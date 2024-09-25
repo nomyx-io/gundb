@@ -1,0 +1,27 @@
+# Source files
+src/
+
+# Test files
+__tests__/
+*.test.ts
+*.spec.ts
+
+# Configuration files
+tsconfig.json
+jest.config.js
+
+# Development tools
+.vscode/
+.github/
+.gitignore
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+
+# Documentation files (if you want to exclude them)
+docs/
+
+# Any other files or directories you want to exclude

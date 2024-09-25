@@ -1,0 +1,587 @@
+.//middleware.ts
+import { Context, Next } from 'koa';
+import { ValidationError, DatabaseError, NotFoundError, ConflictError } from './errors';
+import { logger } from './logger';
+
+export async function errorHandler(ctx: Context, next: Next) {
+  try {
+    await next();
+  } catch (err) {
+    logger.error('Error caught in middleware', { error: err });
+
+    if (err instanceof ValidationError) {
+      ctx.status = 400;
+      ctx.body = { error: 'Validation Error', message: err.message };
+    } else if (err instanceof NotFoundError) {
+      ctx.status = 404;
+      ctx.body = { error: 'Not Found', message: err.message };
+    } else if (err instanceof ConflictError) {
+      ctx.status = 409;
+      ctx.body = { error: 'Conflict', message: err.message };
+    } else if (err instanceof DatabaseError) {
+      ctx.status = 500;
+      ctx.body = { error: 'Database Error', message: 'An unexpected database error occurred' };
+    } else {
+      ctx.status = 500;
+      ctx.body = { error: 'Internal Server Error', message: 'An unexpected error occurred' };
+    }
+
+    ctx.app.emit('error', err, ctx);
+  }
+}.//errors.ts
+export class ValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ValidationError';
+  }
+}
+
+export class DatabaseError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'DatabaseError';
+  }
+}
+
+export class NotFoundError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'NotFoundError';
+  }
+}
+
+export class ConflictError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ConflictError';
+  }
+}.//__test__/model.test.ts
+import { Model } from '../model';
+import Joi from 'joi';
+import { ValidationError, DatabaseError, NotFoundError } from '../errors';
+import { v4 as uuid } from 'uuid';
+
+jest.mock('gun');
+jest.mock('async-mutex');
+jest.mock('uuid');
+jest.mock('../logger');
+
+describe('Model', () => {
+  let model: Model<any>;
+  let mockGun: any;
+  let mockSchema: Joi.ObjectSchema;
+
+  beforeEach(() => {
+    mockGun = {
+      get: jest.fn().mockReturnThis(),
+      put: jest.fn(),
+      map: jest.fn().mockReturnThis(),
+      once: jest.fn(),
+    };
+    mockSchema = Joi.object({
+      id: Joi.string(),
+      name: Joi.string().required(),
+      age: Joi.number().integer().min(0),
+    });
+    model = new Model(mockGun, mockSchema);
+    (uuid as jest.Mock).mockReturnValue('mocked-uuid');
+  });
+
+  describe('save', () => {
+    it('should save valid data', async () => {
+      const validData = { name: 'John Doe', age: 30 };
+      mockGun.put.mockImplementation((data: any, cb: (ack: { ok: boolean }) => void) => cb({ ok: true }));
+
+      const result = await model.save(validData);
+
+      expect(result).toEqual(expect.objectContaining(validData));
+      expect(mockGun.get).toHaveBeenCalledWith('mocked-uuid');
+      expect(mockGun.put).toHaveBeenCalledWith(expect.objectContaining(validData), expect.any(Function));
+    });
+
+    it('should throw ValidationError for invalid data', async () => {
+      const invalidData = { age: 'not a number' };
+
+      await expect(model.save(invalidData)).rejects.toThrow(ValidationError);
+    });
+
+    it('should throw DatabaseError if Gun operation fails', async () => {
+      const validData = { name: 'John Doe', age: 30 };
+      mockGun.put.mockImplementation((data: any, cb: (ack: { err: string }) => void) => cb({ err: 'Database error' }));
+
+      await expect(model.save(validData)).rejects.toThrow(DatabaseError);
+    });
+  });
+
+  describe('find', () => {
+    it('should return matching documents', async () => {
+      const mockData = {
+        '1': { id: '1', name: 'John', age: 30 },
+        '2': { id: '2', name: 'Jane', age: 25 },
+      };
+      mockGun.map.mockReturnThis();
+      mockGun.once.mockImplementation((cb: (data: any, key: string) => void) => {
+        Object.entries(mockData).forEach(([key, value]) => cb(value, key));
+        setTimeout(() => cb(null, 'last'), 0);
+      });
+
+      const result = await model.find({ age: { $gte: 25 } });
+
+      expect(result).toHaveLength(2);
+      expect(result).toEqual(expect.arrayContaining([
+        expect.objectContaining({ name: 'John', age: 30 }),
+        expect.objectContaining({ name: 'Jane', age: 25 }),
+      ]));
+    });
+
+    it('should apply limit and skip options', async () => {
+      const mockData = {
+        '1': { id: '1', name: 'John', age: 30 },
+        '2': { id: '2', name: 'Jane', age: 25 },
+        '3': { id: '3', name: 'Bob', age: 35 },
+      };
+      mockGun.map.mockReturnThis();
+      mockGun.once.mockImplementation((cb: (data: any, key: string) => void) => {
+        Object.entries(mockData).forEach(([key, value]) => cb(value, key));
+        setTimeout(() => cb(null, 'last'), 0);
+      });
+
+      const result = await model.find({}, { limit: 2, skip: 1 });
+
+      expect(result).toHaveLength(2);
+      expect(result).toEqual(expect.arrayContaining([
+        expect.objectContaining({ name: 'Jane', age: 25 }),
+        expect.objectContaining({ name: 'Bob', age: 35 }),
+      ]));
+    });
+  });
+
+  describe('findOne', () => {
+    it('should return the first matching document', async () => {
+      const mockData = {
+        '1': { id: '1', name: 'John', age: 30 },
+      };
+      mockGun.map.mockReturnThis();
+      mockGun.once.mockImplementation((cb: (data: any, key: string) => void) => {
+        Object.entries(mockData).forEach(([key, value]) => cb(value, key));
+        setTimeout(() => cb(null, 'last'), 0);
+      });
+
+      const result = await model.findOne({ name: 'John' });
+
+      expect(result).toEqual(expect.objectContaining({ id: '1', name: 'John', age: 30 }));
+    });
+
+    it('should return null if no document matches', async () => {
+      mockGun.map.mockReturnThis();
+      mockGun.once.mockImplementation((cb: (data: any, key: string) => void) => {
+        setTimeout(() => cb(null, 'last'), 0);
+      });
+
+      const result = await model.findOne({ name: 'NonExistent' });
+
+      expect(result).toBeNull();
+    }, 10000);
+  });
+
+  describe('update', () => {
+    it('should update an existing document', async () => {
+      const existingData = { id: '1', name: 'John', age: 30 };
+      const updateData = { age: 31 };
+      mockGun.once.mockImplementation((cb: (data: any) => void) => cb(existingData));
+      mockGun.put.mockImplementation((data: any, cb: (ack: { ok: boolean }) => void) => cb({ ok: true }));
+
+      const result = await model.update('1', updateData);
+
+      expect(result).toEqual(expect.objectContaining({ ...existingData, ...updateData }));
+      expect(mockGun.get).toHaveBeenCalledWith('1');
+      expect(mockGun.put).toHaveBeenCalledWith(expect.objectContaining({ ...existingData, ...updateData }), expect.any(Function));
+    });
+
+    it('should throw NotFoundError if document does not exist', async () => {
+      mockGun.once.mockImplementation((cb: (data: any) => void) => cb(null));
+
+      await expect(model.update('nonexistent', { age: 31 })).rejects.toThrow(NotFoundError);
+    });
+
+    it('should throw DatabaseError if Gun operation fails', async () => {
+      const existingData = { id: '1', name: 'John', age: 30 };
+      const updateData = { age: 31 };
+      mockGun.once.mockImplementation((cb: (data: any) => void) => cb(existingData));
+      mockGun.put.mockImplementation((data: any, cb: (ack: { err: string }) => void) => cb({ err: 'Database error' }));
+
+      await expect(model.update('1', updateData)).rejects.toThrow(DatabaseError);
+    });
+  });
+
+  describe('delete', () => {
+    it('should delete an existing document', async () => {
+      mockGun.once.mockImplementation((cb: (data: any) => void) => cb({ id: '1', name: 'John', age: 30 }));
+      mockGun.put.mockImplementation((data: any, cb: (ack: { ok: boolean }) => void) => cb({ ok: true }));
+
+      await expect(model.delete('1')).resolves.not.toThrow();
+      expect(mockGun.get).toHaveBeenCalledWith('1');
+      expect(mockGun.once).toHaveBeenCalled();
+      expect(mockGun.put).toHaveBeenCalledWith(null, expect.any(Function));
+    });
+
+    it('should throw NotFoundError if document does not exist', async () => {
+      mockGun.once.mockImplementation((cb: (data: any) => void) => cb(undefined));
+
+      await expect(model.delete('nonexistent')).rejects.toThrow(NotFoundError);
+    });
+
+    it('should throw DatabaseError if Gun operation fails', async () => {
+      mockGun.once.mockImplementation((cb: (data: any) => void) => cb({ id: '1', name: 'John', age: 30 }));
+      mockGun.put.mockImplementation((data: any, cb: (ack: { err: string }) => void) => cb({ err: 'Database error' }));
+
+      await expect(model.delete('1')).rejects.toThrow(DatabaseError);
+    });
+  });
+
+  describe('count', () => {
+    it('should return the count of matching documents', async () => {
+      const mockData = {
+        '1': { id: '1', name: 'John', age: 30 },
+        '2': { id: '2', name: 'Jane', age: 25 },
+        '3': { id: '3', name: 'Bob', age: 35 },
+      };
+      mockGun.map.mockReturnThis();
+      mockGun.once.mockImplementation((cb: (data: any, key: string) => void) => {
+        Object.entries(mockData).forEach(([key, value]) => cb(value, key));
+        setTimeout(() => cb(null, 'last'), 0);
+      });
+
+      const result = await model.count({ age: { $gte: 30 } });
+
+      expect(result).toBe(2);
+    });
+
+    it('should return 0 if no documents match', async () => {
+      mockGun.map.mockReturnThis();
+      mockGun.once.mockImplementation((cb: (data: any, key: string) => void) => {
+        setTimeout(() => cb(null, 'last'), 0);
+      });
+
+      const result = await model.count({ age: { $gt: 100 } });
+
+      expect(result).toBe(0);
+    }, 10000);
+  });
+});.//__test__/database.test.ts
+import { Database } from '../database';
+import { Model } from '../model';
+import Joi from 'joi';
+
+jest.mock('../model');
+
+describe('Database', () => {
+  let database: Database;
+  let mockGun: any;
+
+  beforeEach(() => {
+    jest.clearAllMocks(); // Clear all mocks before each test
+    mockGun = {
+      get: jest.fn().mockReturnThis(),
+    };
+    database = new Database(mockGun);
+  });
+
+  describe('model', () => {
+    it('should create and return a new model if it does not exist', () => {
+      const schema = Joi.object();
+      const modelName = 'testModel';
+
+      const result = database.model(modelName, schema);
+
+      expect(Model).toHaveBeenCalledWith(expect.anything(), schema);
+      expect(result).toBeInstanceOf(Model);
+      expect(mockGun.get).toHaveBeenCalledWith(modelName);
+    });
+
+    it('should return an existing model if it already exists', () => {
+      const schema = Joi.object();
+      const modelName = 'testModel';
+
+      const firstCall = database.model(modelName, schema);
+      const secondCall = database.model(modelName, schema);
+
+      expect(Model).toHaveBeenCalledTimes(1);
+      expect(firstCall).toBe(secondCall);
+      expect(mockGun.get).toHaveBeenCalledTimes(1);
+    });
+  });
+});.//model.ts
+import Gun, { IGunInstance } from 'gun';
+import Joi, { ObjectSchema } from 'joi';
+import sift from 'sift';
+import { Mutex } from 'async-mutex';
+import { v4 as uuid } from 'uuid';
+import { ValidationError, DatabaseError, NotFoundError } from './errors';
+import { logger } from './logger';
+
+export class Model<T> {
+  private readonly gun: any;
+  private readonly schema: ObjectSchema<T>;
+  private readonly mutex: Mutex;
+
+  constructor(gun: IGunInstance<any>, schema: ObjectSchema<T>) {
+    this.gun = gun;
+    this.schema = schema;
+    this.mutex = new Mutex();
+  }
+
+  private async validate(data: Partial<T>): Promise<T> {
+    try {
+      return await this.schema.validateAsync(data, { abortEarly: false });
+    } catch (error) {
+      if (error instanceof Joi.ValidationError) {
+        throw new ValidationError(error.details.map(detail => detail.message).join(', '));
+      }
+      throw error;
+    }
+  }
+
+  private generateKey(data: any): string {
+    return data.id || uuid();
+  }
+
+  async save(data: T): Promise<T> {
+    logger.info('Saving document', { data });
+    try {
+      const validatedData = await this.validate(data);
+      const key = this.generateKey(validatedData);
+      await this.mutex.runExclusive(async () => {
+        await new Promise<void>((resolve, reject) => {
+          const gunRef = this.gun.get(key);
+          gunRef.once((existingData: any) => {
+            gunRef.put(validatedData as any, (ack: any) => {
+              if (ack.err) reject(new DatabaseError(ack.err));
+              else resolve();
+            });
+          });
+        });
+      });
+      logger.info('Document saved successfully', { key });
+      return validatedData;
+    } catch (err) {
+      logger.error('Failed to save document', { error: err });
+      if (err instanceof ValidationError || err instanceof DatabaseError) {
+        throw err;
+      }
+      throw new DatabaseError('Failed to save document');
+    }
+  }
+
+  async find(query: Partial<T>, options: { limit?: number; skip?: number } = {}): Promise<T[]> {
+    logger.info('Finding documents', { query, options });
+    try {
+      const data = await new Promise<Record<string, T>>((resolve, reject) => {
+        const result: Record<string, T> = {};
+        this.gun.map().once((data: any, key: string) => {
+          if (data) {
+            result[key] = data as T;
+          }
+        });
+        setTimeout(() => resolve(result), 1000); // Resolve after 1 second
+      });
+
+      let result = Object.values(data).filter(sift(query as any)) as T[];
+
+      if (options.skip) {
+        result = result.slice(options.skip);
+      }
+
+      if (options.limit) {
+        result = result.slice(0, options.limit);
+      }
+
+      logger.info('Documents found', { count: result.length });
+      return result;
+    } catch (err) {
+      logger.error('Failed to find documents', { error: err });
+      throw new DatabaseError('Failed to find documents');
+    }
+  }
+
+  async findOne(query: Partial<T>): Promise<T | null> {
+    logger.info('Finding one document', { query });
+    const results = await this.find(query, { limit: 1 });
+    return results[0] || null;
+  }
+
+  async update(key: string, data: Partial<T>): Promise<T> {
+    logger.info('Updating document', { key, data });
+    try {
+      const existingData = await new Promise<T | null>((resolve, reject) => {
+        this.gun.get(key).once((data: any) => {
+          if (data) resolve(data as T);
+          else resolve(null);
+        });
+      });
+
+      if (!existingData) {
+        throw new NotFoundError(`Document with key ${key} not found`);
+      }
+
+      const updatedData = { ...existingData, ...data };
+      const validatedData = await this.validate(updatedData);
+
+      await this.mutex.runExclusive(async () => {
+        await new Promise<void>((resolve, reject) => {
+          this.gun.get(key).put(validatedData as any, (ack: any) => {
+            if (ack.err) reject(new DatabaseError(ack.err));
+            else resolve();
+          });
+        });
+      });
+
+      logger.info('Document updated successfully', { key });
+      return validatedData;
+    } catch (err) {
+      logger.error('Failed to update document', { error: err });
+      if (err instanceof NotFoundError || err instanceof ValidationError || err instanceof DatabaseError) {
+        throw err;
+      }
+      throw new DatabaseError('Failed to update document');
+    }
+  }
+
+  async delete(key: string): Promise<void> {
+    logger.info('Deleting document', { key });
+    try {
+      await this.mutex.runExclusive(async () => {
+        await new Promise<void>((resolve, reject) => {
+          this.gun.get(key).once((data: any) => {
+            if (data === undefined) {
+              reject(new NotFoundError(`Document with key ${key} not found`));
+            } else {
+              this.gun.get(key).put(null as any, (ack: any) => {
+                if (ack.err) reject(new DatabaseError(ack.err));
+                else resolve();
+              });
+            }
+          });
+        });
+      });
+      logger.info('Document deleted successfully', { key });
+    } catch (err) {
+      logger.error('Failed to delete document', { error: err });
+      if (err instanceof NotFoundError || err instanceof DatabaseError) {
+        throw err;
+      }
+      throw new DatabaseError('Failed to delete document');
+    }
+  }
+
+  async count(query: Partial<T>): Promise<number> {
+    logger.info('Counting documents', { query });
+    const results = await this.find(query);
+    return results.length;
+  }
+}.//logger.ts
+import Winston from 'winston';
+import { config } from './config';
+
+export const logger = Winston.createLogger({
+  level: config.logLevel,
+  format: Winston.format.combine(
+    Winston.format.timestamp(),
+    Winston.format.json()
+  ),
+  defaultMeta: { service: 'gun-db' },
+  transports: [
+    new Winston.transports.File({ filename: 'error.log', level: 'error' }),
+    new Winston.transports.File({ filename: 'combined.log' }),
+    new Winston.transports.Console({
+      format: Winston.format.combine(
+        Winston.format.colorize(),
+        Winston.format.simple()
+      )
+    })
+  ],
+});
+
+// Add log rotation
+if (config.enableLogRotation) {
+  const { DailyRotateFile } = require('winston-daily-rotate-file');
+  
+  logger.add(new DailyRotateFile({
+    filename: 'application-%DATE%.log',
+    datePattern: 'YYYY-MM-DD',
+    zippedArchive: true,
+    maxSize: '20m',
+    maxFiles: '14d'
+  }));
+}.//database.ts
+import Gun, { IGunInstance } from 'gun';
+import { ObjectSchema } from 'joi';
+import { Model } from './model';
+
+export class Database {
+  private readonly gun: IGunInstance<any>;
+  private readonly models: Map<string, Model<any>>;
+
+  constructor(gun: IGunInstance<any>) {
+    this.gun = gun;
+    this.models = new Map();
+  }
+
+  model<T>(name: string, schema: ObjectSchema<T>): Model<T> {
+    if (this.models.has(name)) {
+      return this.models.get(name) as Model<T>;
+    }
+    const model = new Model<T>(this.gun.get(name) as any, schema);
+    this.models.set(name, model);
+    return model;
+  }
+}.//index.ts
+import Gun from 'gun';
+import Koa from 'koa';
+import bodyParser from 'koa-bodyparser';
+import cors from '@koa/cors';
+import { config } from './config';
+import { Database } from './database';
+import { errorHandler } from './middleware';
+import { logger } from './logger';
+
+// Initialize Gun
+const gun = Gun({
+  peers: config.gunPeers
+});
+
+// Initialize Database
+export const db = new Database(gun);
+
+// Initialize Koa app
+export const app = new Koa();
+
+// Middleware
+app.use(cors());
+app.use(bodyParser());
+app.use(errorHandler);
+
+// Start server
+const port = config.port;
+app.listen(port, () => {
+  logger.info(`Server running on port ${port}`);
+});
+
+// Export all modules
+export * from './errors';
+export * from './model';
+export * from './database';
+export * from './middleware';
+export * from './logger';
+export * from './config';
+.//config.ts
+import dotenv from 'dotenv';
+
+dotenv.config();
+
+export const config = {
+  port: process.env.PORT || 3000,
+  gunPeers: process.env.GUN_PEERS ? process.env.GUN_PEERS.split(',') : [],
+  logLevel: process.env.LOG_LEVEL || 'info',
+  enableLogRotation: process.env.ENABLE_LOG_ROTATION === 'true',
+};

@@ -1,6 +1,6 @@
 {
   "name": "@nomyx/gundb",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "A TypeScript wrapper for GunDB with additional features and utilities - works in both Node.js and browser environments",
   "main": "dist/index.js",
   "module": "dist/esm/index.js",

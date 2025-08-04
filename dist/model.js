@@ -22,7 +22,7 @@ class Model {
         }
         catch (error) {
             if (error instanceof joi_1.default.ValidationError) {
-                throw new errors_1.ValidationError(error.details.map(detail => detail.message).join(', '));
+                throw new errors_1.ValidationError(error.details.map((detail) => detail.message).join(', '));
             }
             throw error;
         }

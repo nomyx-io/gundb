@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GunDB Browser Test</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        .test-result {
+            padding: 10px;
+            margin: 10px 0;
+            border-radius: 5px;
+        }
+        .pass {
+            background-color: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        .fail {
+            background-color: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+        .log {
+            background-color: #f8f9fa;
+            border: 1px solid #dee2e6;
+            padding: 10px;
+            margin: 10px 0;
+            border-radius: 5px;
+            font-family: monospace;
+            white-space: pre-wrap;
+        }
+    </style>
+</head>
+<body>
+    <h1>GunDB Browser Compatibility Test</h1>
+    <div id="test-results"></div>
+    <div id="logs" class="log"></div>
+
+    <!-- Load Gun.js from CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/gun/gun.js"></script>
+    
+    <!-- Load our library (this would be the built browser version) -->
+    <script type="module">
+        // Simulate our library's browser bundle
+        const IS_BROWSER = typeof window !== 'undefined' && typeof window.document !== 'undefined';
+
+        // Browser-compatible config
+        function getBrowserConfig() {
+            const stored = typeof localStorage !== 'undefined' ? localStorage.getItem('gundb-config') : null;
+            const browserConfig = stored ? JSON.parse(stored) : {};
+            
+            return {
+                port: browserConfig.port || 3000,
+                gunPeers: browserConfig.gunPeers || ['https://gun-manhattan.herokuapp.com/gun'],
+                logLevel: browserConfig.logLevel || 'info',
+                enableLogRotation: browserConfig.enableLogRotation || false,
+            };
+        }
+
+        const config = getBrowserConfig();
+
+        // Browser logger
+        class BrowserLogger {
+            constructor(service = 'gun-db', logLevel = 'info') {
+                this.service = service;
+                this.logLevel = logLevel;
+            }
+
+            log(level, message, meta) {
+                const entry = {
+                    level,
+                    message,
+                    timestamp: new Date().toISOString(),
+                    service: this.service,
+                    meta,
+                };
+                
+                const logMsg = `[${entry.timestamp}] ${entry.level.toUpperCase()}: ${entry.message}`;
+                console[level === 'error' ? 'error' : level === 'warn' ? 'warn' : 'log'](logMsg, entry.meta || '');
+                
+                // Also display in our log div
+                const logsDiv = document.getElementById('logs');
+                logsDiv.textContent += logMsg + (meta ? ' ' + JSON.stringify(meta) : '') + '\n';
+            }
+
+            error(message, meta) { this.log('error', message, meta); }
+            warn(message, meta) { this.log('warn', message, meta); }
+            info(message, meta) { this.log('info', message, meta); }
+            debug(message, meta) { this.log('debug', message, meta); }
+        }
+
+        const logger = new BrowserLogger('gun-db', config.logLevel);
+
+        // Simple database wrapper
+        class Database {
+            constructor(gun) {
+                this.gun = gun;
+                this.models = new Map();
+            }
+
+            model(name, schema) {
+                if (this.models.has(name)) {
+                    return this.models.get(name);
+                }
+                const model = { 
+                    gun: this.gun.get(name),
+                    name: name,
+                    save: async function(data) {
+                        return new Promise((resolve, reject) => {
+                            const key = data.id || Math.random().toString(36).substring(2, 15);
+                            this.gun.get(key).put(data, (ack) => {
+                                if (ack.err) reject(new Error(ack.err));
+                                else resolve(data);
+                            });
+                        });
+                    },
+                    find: async function() {
+                        return new Promise((resolve) => {
+                            const results = [];
+                            this.gun.map().once((data, key) => {
+                                if (data) results.push(data);
+                            });
+                            setTimeout(() => resolve(results), 1000);
+                        });
+                    }
+                };
+                this.models.set(name, model);
+                return model;
+            }
+        }
+
+        function createGun(config = {}) {
+            const mergedConfig = { ...getBrowserConfig(), ...config };
+            return Gun({
+                peers: mergedConfig.gunPeers
+            });
+        }
+
+        function createDatabase(gun) {
+            return new Database(gun);
+        }
+
+        // Test functions
+        const tests = [];
+        const results = document.getElementById('test-results');
+
+        function addTest(name, testFn) {
+            tests.push({ name, testFn });
+        }
+
+        function showResult(name, passed, message = '') {
+            const div = document.createElement('div');
+            div.className = `test-result ${passed ? 'pass' : 'fail'}`;
+            div.textContent = `${name}: ${passed ? 'PASS' : 'FAIL'}${message ? ' - ' + message : ''}`;
+            results.appendChild(div);
+        }
+
+        // Define tests
+        addTest('Environment Detection', () => {
+            return IS_BROWSER === true;
+        });
+
+        addTest('Config Loading', () => {
+            const config = getBrowserConfig();
+            return config && typeof config.gunPeers === 'object' && Array.isArray(config.gunPeers);
+        });
+
+        addTest('Logger Creation', () => {
+            const logger = new BrowserLogger();
+            return logger && typeof logger.info === 'function';
+        });
+
+        addTest('Gun Instance Creation', () => {
+            const gun = createGun();
+            return gun && typeof gun.get === 'function';
+        });
+
+        addTest('Database Creation', () => {
+            const gun = createGun();
+            const db = createDatabase(gun);
+            return db && typeof db.model === 'function';
+        });
+
+        addTest('Model Creation', () => {
+            const gun = createGun();
+            const db = createDatabase(gun);
+            const testModel = db.model('test', {});
+            return testModel && typeof testModel.save === 'function';
+        });
+
+        addTest('Data Storage', async () => {
+            try {
+                const gun = createGun();
+                const db = createDatabase(gun);
+                const testModel = db.model('test', {});
+                
+                const testData = { id: 'test1', name: 'Test Item', value: 42 };
+                const result = await testModel.save(testData);
+                
+                return result && result.name === 'Test Item';
+            } catch (error) {
+                logger.error('Data storage test failed', { error: error.message });
+                return false;
+            }
+        });
+
+        // Run tests
+        async function runTests() {
+            logger.info('Starting browser compatibility tests');
+            
+            for (const test of tests) {
+                try {
+                    const result = await test.testFn();
+                    showResult(test.name, result);
+                    logger.info(`Test "${test.name}": ${result ? 'PASS' : 'FAIL'}`);
+                } catch (error) {
+                    showResult(test.name, false, error.message);
+                    logger.error(`Test "${test.name}" failed with error`, { error: error.message });
+                }
+            }
+            
+            logger.info('All tests completed');
+        }
+
+        // Start tests when page loads
+        window.addEventListener('load', runTests);
+    </script>
+</body>
+</html>

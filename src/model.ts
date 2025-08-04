@@ -20,9 +20,9 @@ export class Model<T> {
   private async validate(data: Partial<T>): Promise<T> {
     try {
       return await this.schema.validateAsync(data, { abortEarly: false });
-    } catch (error) {
+    } catch (error: any) {
       if (error instanceof Joi.ValidationError) {
-        throw new ValidationError(error.details.map(detail => detail.message).join(', '));
+        throw new ValidationError(error.details.map((detail: any) => detail.message).join(', '));
       }
       throw error;
     }

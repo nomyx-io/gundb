@@ -5,4 +5,6 @@ export interface Config {
     enableLogRotation: boolean;
 }
 export declare const config: Config;
+export declare function updateBrowserConfig(newConfig: Partial<Config>): void;
+export declare const IS_BROWSER: boolean;
 //# sourceMappingURL=config.d.ts.map
